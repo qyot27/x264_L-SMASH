@@ -31,6 +31,7 @@
 #undef DECLARE_ALIGNED
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
+#include <libavutil/pixdesc.h>
 
 #define FAIL_IF_ERROR( cond, ... ) FAIL_IF_ERR( cond, "ffms", __VA_ARGS__ )
 
@@ -81,7 +82,20 @@ static int open_file( char *psz_filename, hnd_t *p_handle, video_info_t *info, c
     if( !h )
         return -1;
 
+#ifdef __MINGW32__
+    /* FFMS supports UTF-8 filenames, but it uses std::fstream internally which is broken with Unicode in MinGW. */
+    FFMS_Init( 0, 0 );
+    char src_filename[MAX_PATH];
+    char idx_filename[MAX_PATH];
+    FAIL_IF_ERROR( !x264_ansi_filename( psz_filename, src_filename, MAX_PATH, 0 ), "invalid ansi filename\n" );
+    if( opt->index_file )
+        FAIL_IF_ERROR( !x264_ansi_filename( opt->index_file, idx_filename, MAX_PATH, 1 ), "invalid ansi filename\n" );
+#else
     FFMS_Init( 0, 1 );
+    char *src_filename = psz_filename;
+    char *idx_filename = opt->index_file;
+#endif
+
     FFMS_ErrorInfo e;
     e.BufferSize = 0;
     int seekmode = opt->seek ? FFMS_SEEK_NORMAL : FFMS_SEEK_LINEAR_NO_RW;
@@ -164,6 +178,29 @@ static int open_file( char *psz_filename, hnd_t *p_handle, video_info_t *info, c
         info->timebase_num = timebase_num;
         info->timebase_den = timebase_den;
     }
+
+    /* show video info */
+    FFMS_Indexer *idxer    = FFMS_CreateIndexer( psz_filename, &e );
+    const char *format     = FFMS_GetFormatNameI( idxer );
+    const char *codec      = FFMS_GetCodecNameI( idxer, trackno );
+    double duration        = videop->NumFrames * videop->FPSDenominator / videop->FPSNumerator;
+    const AVPixFmtDescriptor *pix_desc = av_pix_fmt_desc_get(frame->EncodedPixelFormat);
+    x264_cli_log( "ffms", X264_LOG_INFO,
+                  "\n Format    : %s"
+                  "\n Codec     : %s"
+                  "\n PixFmt    : %s"
+                  "\n Framerate : %d/%d"
+                  "\n Timebase  : %"PRIu64"/%"PRIu64
+                  "\n Duration  : %d:%02d:%02d\n",
+                  format,
+                  codec,
+                  pix_desc->name,
+                  videop->FPSNumerator, videop->FPSDenominator,
+                  (uint64_t)info->timebase_num, (uint64_t)info->timebase_den * 1000,
+                  (int)duration / 60 / 60, (int)duration / 60 % 60, (int)duration - (int)duration / 60 * 60 );
+    if( !strcmp( codec,"rawvideo" ) )
+        x264_cli_log( "ffms", X264_LOG_WARNING, "recommend using --demuxer lavf with rawvideo" );
+    FFMS_CancelIndexing( idxer );
 
     *p_handle = h;
     return 0;
